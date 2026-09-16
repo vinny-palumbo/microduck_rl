@@ -19,6 +19,7 @@ import socket
 import socketserver
 import struct
 import threading
+import time
 
 import mujoco
 import numpy as np
@@ -97,6 +98,7 @@ class Camera:
         self.width = width
         self.height = height
         self.latest: bytes | None = None
+        self.latest_at = 0.0
         self.lock = threading.Lock()
 
     def render(self, world) -> None:
@@ -114,23 +116,79 @@ class Camera:
         packed = to_uyvy(self.renderer.render())
         with self.lock:
             self.latest = packed
+            self.latest_at = time.monotonic()
+
+    def frame(self, max_age: float = 2.0) -> bytes | None:
+        with self.lock:
+            return self.latest if time.monotonic() - self.latest_at <= max_age else None
+
+
+class CameraWorker:
+    """Render on a dedicated GL-owning thread so slow frames cannot stall physics.
+
+    EGL/OSMesa software rendering can take hundreds of milliseconds. The daemon's
+    gait still needs physics and sensor reads every 20 ms during that frame. Only
+    the short scene copy holds the world's lock; rendering and colour conversion
+    happen independently. The GL context is created, used and closed on this thread.
+    """
+
+    def __init__(self, world, name: str, fps: int = FPS):
+        if fps < 1:
+            raise ValueError("camera fps must be positive")
+        self.world = world
+        self.name = name
+        self.fps = fps
+        self.camera: Camera | None = None
+        self.error: BaseException | None = None
+        self.ready = threading.Event()
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name=f"camera-{name}", daemon=True)
+        self.thread.start()
+        if not self.ready.wait(timeout=30):
+            self.stopped.set()
+            raise RuntimeError(f"camera {name} initialization timed out")
+        if self.error is not None:
+            raise RuntimeError(f"camera {name} initialization failed") from self.error
+
+    def _run(self) -> None:
+        try:
+            with self.world.lock:
+                self.camera = Camera(self.world.model, self.name)
+                # Camera() corrects the mounting quaternion; update the data once
+                # before the first render, including while the robot is held.
+                mujoco.mj_forward(self.world.model, self.world.data)
+            self.ready.set()
+            while not self.stopped.is_set():
+                started = time.monotonic()
+                self.camera.render(self.world)
+                self.stopped.wait(max(0, 1.0 / self.fps - (time.monotonic() - started)))
+        except BaseException as error:
+            self.error = error
+            print(f"== camera {self.name} stopped: {error}", flush=True)
+        finally:
+            self.ready.set()
+            if self.camera is not None:
+                self.camera.renderer.close()
 
     def frame(self) -> bytes | None:
-        with self.lock:
-            return self.latest
+        if self.camera is None or self.error is not None or self.stopped.is_set():
+            return None
+        return self.camera.frame(max_age=max(2.0, 3.0 / self.fps))
+
+    def close(self) -> None:
+        self.stopped.set()
+        self.thread.join(timeout=2.0)
 
 
 class FrameHandler(socketserver.BaseRequestHandler):
     """Length-prefixed frames, at the camera's rate, until the reader goes away."""
 
     def handle(self) -> None:
-        camera: Camera = self.server.camera
+        camera: Camera | CameraWorker = self.server.camera
         fps: int = self.server.fps
         self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         print(f"== camera: a reader connected from {self.client_address}", flush=True)
         period = 1.0 / max(1, fps)
-        import time
-
         next_frame = time.perf_counter()
         try:
             while True:

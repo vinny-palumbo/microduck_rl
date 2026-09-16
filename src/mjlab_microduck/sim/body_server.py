@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import socket
 import socketserver
 import threading
@@ -53,7 +54,7 @@ import mujoco
 import numpy as np
 
 from mjlab_microduck.sim.camera import FPS as CAMERA_FPS
-from mjlab_microduck.sim.camera import Camera, FrameHandler, FrameServer
+from mjlab_microduck.sim.camera import CameraWorker, FrameHandler, FrameServer
 from mjlab_microduck.sim.tof import COLS, ROWS, Tof
 
 PROTOCOL = 1
@@ -239,7 +240,7 @@ class Body:
         self.tof = Tof(model, ident(mujoco.mjtObj.mjOBJ_SITE, "tof"), seed=index)
         # Built only when this duck is one of `--cameras`: a renderer costs 12 ms a frame, which is
         # forty times what stepping four ducks' physics costs.
-        self.camera: Camera | None = None
+        self.camera: CameraWorker | None = None
         self.trunk = int(model.jnt_qposadr[ident(mujoco.mjtObj.mjOBJ_JOINT, "trunk_base_freejoint")])
         self.trunk_dof = int(model.jnt_dofadr[ident(mujoco.mjtObj.mjOBJ_JOINT, "trunk_base_freejoint")])
 
@@ -258,12 +259,16 @@ class Body:
 
     # ── placement ─────────────────────────────────────────────────────────
 
-    def place(self, pose: dict[str, float] | None, trunk_z: float, offset_y: float) -> None:
+    def place(self, pose: dict[str, float] | None, trunk_z: float, offset_y: float,
+              offset_x: float = 0.0, yaw: float = 0.0) -> None:
+        """Place before the daemon enables torque; yaw is in radians about world +z."""
+        if not all(math.isfinite(value) for value in (trunk_z, offset_x, offset_y, yaw)):
+            raise ValueError("placement must be finite")
         data = self.world.data
-        data.qpos[self.trunk + 0] = 0.0
+        data.qpos[self.trunk + 0] = offset_x
         data.qpos[self.trunk + 1] = offset_y
         data.qpos[self.trunk + 2] = trunk_z
-        data.qpos[self.trunk + 3 : self.trunk + 7] = [1.0, 0.0, 0.0, 0.0]
+        data.qpos[self.trunk + 3 : self.trunk + 7] = [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]
         data.qvel[self.trunk_dof : self.trunk_dof + 6] = 0.0
         for slot, wire_index in enumerate(self.to_wire):
             name = JOINT_NAMES[wire_index]
@@ -436,7 +441,7 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-def run(world: World, headless: bool) -> None:
+def run(world: World, headless: bool, truth_logger=None) -> None:
     """Step in real time.
 
     **Real time, not as fast as possible.** The daemon's loop is wall-clock and its health gate
@@ -465,15 +470,14 @@ def run(world: World, headless: bool) -> None:
     # the scene on this thread, and with several ducks in it that is the difference between keeping
     # real time and not.
     passes_per_frame = max(1, round((1.0 / 30.0) / period))
-    # The cameras, at their own rate — slower than the viewer and far slower than physics.
-    eyes = [b for b in world.bodies if b.camera is not None]
-    passes_per_eye = max(1, round((1.0 / CAMERA_FPS) / period))
     step = 0
     next_step = time.perf_counter()
     behind = 0
     try:
         while True:
             world.step(batch)
+            if truth_logger is not None:
+                truth_logger.sample()
             if viewer is not None and not viewer.is_running():
                 break
             next_step += period
@@ -492,15 +496,16 @@ def run(world: World, headless: bool) -> None:
             step += 1
             if viewer is not None and step % passes_per_frame == 0:
                 viewer.sync()
-            if eyes and step % passes_per_eye == 0:
-                for body in eyes:
-                    if body.camera is not None:
-                        body.camera.render(world)
     except KeyboardInterrupt:
         pass
     finally:
         if viewer is not None:
             viewer.close()
+        if truth_logger is not None:
+            truth_logger.close()
+        for body in world.bodies:
+            if body.camera is not None:
+                body.camera.close()
 
 
 def main() -> None:
@@ -519,6 +524,14 @@ def main() -> None:
     )
     parser.add_argument("--frame-port", type=int, default=7901, help="the first camera's port")
     parser.add_argument("--camera-fps", type=int, default=CAMERA_FPS)
+    parser.add_argument("--start-x", type=float, default=0.0, help="initial world x in metres")
+    parser.add_argument("--start-y", type=float, default=0.0, help="initial world y in metres")
+    parser.add_argument("--start-yaw-deg", type=float, default=0.0, help="initial heading; +90 faces +y")
+    parser.add_argument(
+        "--evaluation-log", type=Path,
+        help="opt-in NEW JSONL file of simulator truth for an independent post-run kitchen score; "
+        "never supply this file to a navigation planner",
+    )
     parser.add_argument(
         "--limp",
         action="store_true",
@@ -541,6 +554,17 @@ def main() -> None:
         )
     if args.ducks < 1:
         raise SystemExit("--ducks needs at least one duck")
+    if args.camera_fps < 1:
+        raise SystemExit("--camera-fps must be positive")
+    if not all(math.isfinite(value) for value in (args.start_x, args.start_y, args.start_yaw_deg)):
+        raise SystemExit("start pose must be finite")
+    if args.evaluation_log is not None:
+        from mjlab_microduck.sim.navigation_eval import APARTMENT_SCENES
+
+        if args.scene.name not in APARTMENT_SCENES:
+            raise SystemExit("--evaluation-log requires an apartment scene")
+        if args.evaluation_log.exists():
+            raise SystemExit("--evaluation-log must name a new file; preserve earlier evidence")
 
     world = World(args.scene, args.ducks)
     pose, trunk_z = pose_table(args.scene, args.keyframe)
@@ -552,7 +576,8 @@ def main() -> None:
     servers = []
     for index in range(args.ducks):
         body = Body(world, index, limp=args.limp)
-        body.place(pose, trunk_z, offset_y=index * SPACING)
+        body.place(pose, trunk_z, offset_y=args.start_y + index * SPACING,
+                   offset_x=args.start_x, yaw=math.radians(args.start_yaw_deg))
         world.bodies.append(body)
         # Kinematics before anything can be asked for. `site_xpos` and `site_xmat` are unpopulated
         # until a forward pass has run — zero, not stale — and a ToF read that arrives first casts a
@@ -565,7 +590,7 @@ def main() -> None:
         servers.append(server)
 
         if index in wanted:
-            body.camera = Camera(world.model, f"{body.prefix}head_camera")
+            body.camera = CameraWorker(world, f"{body.prefix}head_camera", fps=args.camera_fps)
             frames = FrameServer((args.host, args.frame_port + index), FrameHandler)
             frames.camera = body.camera
             frames.fps = args.camera_fps
@@ -577,7 +602,12 @@ def main() -> None:
         eye = f" · camera on {args.host}:{args.frame_port + index}" if index in wanted else ""
         print(f"==   duck {index}: robotd --sim {args.host}:{args.port + index}{eye}", flush=True)
 
-    run(world, headless=args.headless)
+    truth_logger = None
+    if args.evaluation_log is not None:
+        from mjlab_microduck.sim.navigation_eval import TruthLogger
+
+        truth_logger = TruthLogger(args.evaluation_log, args.scene, world)
+    run(world, headless=args.headless, truth_logger=truth_logger)
 
 
 if __name__ == "__main__":

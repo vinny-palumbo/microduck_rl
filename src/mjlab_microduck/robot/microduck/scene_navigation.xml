@@ -1,0 +1,45 @@
+<mujoco model="navigation_apartment">
+    <include file="scene_apartment_flat.xml" />
+    <!-- Household details supplement the existing collision furniture. They are visual
+         surfaces only: the robot, actuators, floor and doorway geometry stay unchanged.
+         Recognition should come from appliances, not room-name signs or goal markers. -->
+    <worldbody>
+        <!-- Fridge doors and handles on the side facing into the kitchen. -->
+        <geom name="nav_fridge_seam" type="box" size="0.245 0.003 0.004"
+              pos="-3.65 2.396 0.53" rgba="0.25 0.27 0.29 1" contype="0" conaffinity="0" />
+        <geom name="nav_fridge_handle_top" type="capsule" size="0.009"
+              fromto="-3.46 2.375 0.60 -3.46 2.375 0.72" rgba="0.22 0.24 0.26 1" contype="0" conaffinity="0" />
+        <geom name="nav_fridge_handle_bottom" type="capsule" size="0.009"
+              fromto="-3.46 2.375 0.32 -3.46 2.375 0.45" rgba="0.22 0.24 0.26 1" contype="0" conaffinity="0" />
+        <!-- Oven front: black glass, steel surround and horizontal handle. -->
+        <geom name="nav_oven_front" type="box" size="0.24 0.005 0.145"
+              pos="-2.35 2.534 0.19" rgba="0.60 0.62 0.65 1" contype="0" conaffinity="0" />
+        <geom name="nav_oven_glass" type="box" size="0.195 0.005 0.09"
+              pos="-2.35 2.525 0.17" rgba="0.035 0.045 0.055 1" contype="0" conaffinity="0" />
+        <geom name="nav_oven_handle" type="capsule" size="0.008"
+              fromto="-2.53 2.504 0.29 -2.17 2.504 0.29" rgba="0.18 0.20 0.22 1" contype="0" conaffinity="0" />
+        <geom name="nav_hob" type="box" size="0.24 0.16 0.004"
+              pos="-2.35 2.73 0.365" rgba="0.16 0.17 0.18 1" contype="0" conaffinity="0" />
+        <geom name="nav_burner_left" type="cylinder" size="0.060 0.004"
+              pos="-2.47 2.72 0.374" rgba="0.02 0.02 0.02 1" contype="0" conaffinity="0" />
+        <geom name="nav_burner_right" type="cylinder" size="0.060 0.004"
+              pos="-2.22 2.72 0.374" rgba="0.02 0.02 0.02 1" contype="0" conaffinity="0" />
+        <!-- Cabinet doors and sink beside the oven. -->
+        <geom name="nav_cabinet_left" type="box" size="0.235 0.004 0.135"
+              pos="-2.93 2.534 0.19" rgba="0.75 0.69 0.54 1" contype="0" conaffinity="0" />
+        <geom name="nav_cabinet_right" type="box" size="0.245 0.004 0.135"
+              pos="-1.64 2.534 0.19" rgba="0.75 0.69 0.54 1" contype="0" conaffinity="0" />
+        <geom name="nav_cabinet_handle_left" type="capsule" size="0.007"
+              fromto="-3.01 2.516 0.285 -2.86 2.516 0.285" rgba="0.25 0.26 0.28 1" contype="0" conaffinity="0" />
+        <geom name="nav_cabinet_handle_right" type="capsule" size="0.007"
+              fromto="-1.71 2.516 0.285 -1.56 2.516 0.285" rgba="0.25 0.26 0.28 1" contype="0" conaffinity="0" />
+        <geom name="nav_sink_rim" type="box" size="0.18 0.13 0.006"
+              pos="-1.64 2.73 0.368" rgba="0.70 0.73 0.77 1" contype="0" conaffinity="0" />
+        <geom name="nav_sink_basin" type="box" size="0.145 0.098 0.002"
+              pos="-1.64 2.73 0.375" rgba="0.19 0.22 0.25 1" contype="0" conaffinity="0" />
+        <geom name="nav_faucet_stem" type="capsule" size="0.009"
+              fromto="-1.64 2.86 0.37 -1.64 2.86 0.50" rgba="0.74 0.76 0.79 1" contype="0" conaffinity="0" />
+        <geom name="nav_faucet_spout" type="capsule" size="0.009"
+              fromto="-1.64 2.86 0.50 -1.64 2.76 0.50" rgba="0.74 0.76 0.79 1" contype="0" conaffinity="0" />
+    </worldbody>
+</mujoco>

@@ -9,7 +9,9 @@ import mujoco
 import numpy as np
 import pytest
 
-from mjlab_microduck.sim.body_server import Body, HOME_TRUNK_Z, SCENES, World
+from mjlab_microduck.sim.body_server import (
+    Body, HOME_TRUNK_Z, SCENES, World, pose_table, validate_apartment_spawn,
+)
 from mjlab_microduck.sim.navigation_eval import ArrivalEvaluator, SCHEMA, TruthLogger, score_log
 
 
@@ -185,3 +187,62 @@ def test_camera_does_not_repeat_stale_frames_forever(monkeypatch):
     camera.latest_at = time.monotonic() - 4
     assert camera.frame(max_age=2) is None
     assert camera.frame(max_age=5) == b"frame"
+
+
+def test_spawn_rejects_floor_cube_and_preserves_requested_sit_pose():
+    world = World(SCENES / "scene_navigation.xml")
+    body = Body(world, 0)
+    pose, height = pose_table(SCENES / "scene_navigation.xml", "SIT")
+    body.place(pose, height, offset_y=0, offset_x=-0.25, yaw=math.pi / 2)
+    before = world.data.qpos.copy()
+    held = body.held
+    with pytest.raises(ValueError, match="obj_3_geom"):
+        validate_apartment_spawn(body)
+    np.testing.assert_array_equal(world.data.qpos, before)
+    assert body.held is held
+
+
+@pytest.mark.parametrize("x,y,yaw", [(0, 0, 0), (0, -0.4, math.pi/2)])
+def test_spawn_accepts_clear_floor_for_both_sit_and_home(x, y, yaw):
+    world = World(SCENES / "scene_navigation.xml")
+    body = Body(world, 0)
+    pose, height = pose_table(SCENES / "scene_navigation.xml", "SIT")
+    body.place(pose, height, y, x, yaw)
+    before = world.data.qpos.copy()
+    validate_apartment_spawn(body)
+    np.testing.assert_array_equal(world.data.qpos, before)
+
+
+def test_spawn_rejects_missing_floor():
+    world = World(SCENES / "scene_navigation.xml")
+    body = Body(world, 0)
+    body.place(None, HOME_TRUNK_Z, 5.0, 5.0)
+    with pytest.raises(ValueError, match="no flat floor"):
+        validate_apartment_spawn(body)
+
+
+def test_collision_log_excludes_support_and_captures_brief_object_contact(tmp_path):
+    world = World(SCENES / "scene_navigation.xml")
+    body = Body(world, 0)
+    world.bodies = [body]
+    body.place(None, HOME_TRUNK_Z, 0.0, 0.0)
+    path = tmp_path / "contacts.jsonl"
+    logger = TruthLogger(path, SCENES / "scene_navigation.xml", world)
+    world.step(4)
+    logger.sample()
+    # Put one foot directly into the cube for a single step;
+    # move back before the next 10 Hz record. The 200 Hz observer must retain it.
+    body.place(None, HOME_TRUNK_Z, 0.04, -0.30)
+    world.step()
+    body.place(None, HOME_TRUNK_Z, 0.0, 0.0)
+    world.step(20)
+    logger.sample()
+    logger.close()
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records[0]["contacts_hz"] == 200
+    assert records[1]["contacts"]["contact_count"] == 0
+    assert records[2]["contacts"]["contact_steps"] >= 1
+    assert records[2]["contacts"]["max_penetration_m"] > 0
+    assert "obj_3_geom" in records[2]["contacts"]["obstacles"]
+    assert all(not obstacle.startswith("floor") for obstacle in records[2]["contacts"]["obstacles"])
+    assert world.evaluation_observer is None

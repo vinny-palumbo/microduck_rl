@@ -182,6 +182,8 @@ class World:
         self.data = mujoco.MjData(self.model)
         self.lock = threading.Lock()
         self.bodies: list[Body] = []
+        # Optional evaluation observer only; it never contributes observations or controls.
+        self.evaluation_observer = None
 
     def step(self, times: int = 1) -> None:
         """Advance the world, taking the lock once for the whole batch.
@@ -201,6 +203,8 @@ class World:
                 for body in self.bodies:
                     if not body.released:
                         body.restore()
+                if self.evaluation_observer is not None:
+                    self.evaluation_observer()
 
 
 class Body:
@@ -393,6 +397,64 @@ class Body:
         model.actuator_biasprm[self.actuator_slice, 1] = -self._gain * scale
 
 
+def validate_apartment_spawn(body: Body, margin: float = 0.02) -> None:
+    """Reject cluttered placements in both the requested pose and the HOME standing pose.
+
+    This is setup validation, not a planner query. Probe exact collision-geometry
+    distances and restore the original state before any daemon can connect.
+    """
+    world, model, data = body.world, body.world.model, body.world.data
+    root_joint = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT,
+                                  body.prefix + "trunk_base_freejoint")
+    root = model.jnt_bodyid[root_joint]
+    active = [g for g in range(model.ngeom) if model.geom_contype[g] or model.geom_conaffinity[g]]
+    robot = [g for g in active if model.body_rootid[model.geom_bodyid[g]] == root]
+    names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or f"geom_{g}"
+             for g in range(model.ngeom)]
+    floors = [g for g in active if names[g] == "floor" or names[g].startswith("floor_")]
+    obstacles = [g for g in active if g not in robot and g not in floors]
+    saved = (data.qpos.copy(), data.qvel.copy(), data.ctrl.copy(), body.held)
+    try:
+        for label in ("initial", "HOME"):
+            if label == "HOME":
+                x, y = saved[0][body.trunk:body.trunk + 2]
+                quat = saved[0][body.trunk + 3:body.trunk + 7]
+                yaw = 2 * math.atan2(quat[3], quat[0])
+                body.place(None, HOME_TRUNK_Z, y, x, yaw)
+            mujoco.mj_forward(model, data)
+            for own in robot:
+                for obstacle in obstacles:
+                    if not ((model.geom_contype[own] & model.geom_conaffinity[obstacle])
+                            or (model.geom_contype[obstacle] & model.geom_conaffinity[own])):
+                        continue
+                    # Bounding spheres cheaply remove distant pairs before the exact
+                    # convex mesh distance query. No footprint approximation decides clearance.
+                    separation = np.linalg.norm(data.geom_xpos[own] - data.geom_xpos[obstacle])
+                    if separation - model.geom_rbound[own] - model.geom_rbound[obstacle] >= margin:
+                        continue
+                    distance = mujoco.mj_geomDistance(model, data, own, obstacle, margin, None)
+                    if distance < margin:
+                        raise ValueError(f"unsafe {label} spawn: {names[obstacle]} is only "
+                                         f"{distance:.3f} m from the robot (need {margin:.3f} m)")
+            # Confirm flat support under the base and its small support footprint.
+            # Apartment floor slabs are boxes; visual overlays are already excluded.
+            x, y = data.qpos[body.trunk:body.trunk + 2]
+            down = np.array([0.0, 0.0, -1.0])
+            for dx, dy in ((0, 0), (0.10, 0), (-0.10, 0), (0, 0.10), (0, -0.10)):
+                point = np.array([x + dx, y + dy, 0.04])
+                supported = any(
+                    0 <= mujoco.mju_rayGeom(data.geom_xpos[g], data.geom_xmat[g],
+                                           model.geom_size[g], point, down, model.geom_type[g]) <= 0.05
+                    for g in floors
+                )
+                if not supported:
+                    raise ValueError(f"unsafe {label} spawn: no flat floor under the support footprint")
+    finally:
+        data.qpos[:], data.qvel[:], data.ctrl[:] = saved[:3]
+        body.held = saved[3]
+        mujoco.mj_forward(model, data)
+
+
 class Handler(socketserver.StreamRequestHandler):
     """One duck's daemon. One connection at a time, which is the real relationship too."""
 
@@ -578,6 +640,13 @@ def main() -> None:
         body = Body(world, index, limp=args.limp)
         body.place(pose, trunk_z, offset_y=args.start_y + index * SPACING,
                    offset_x=args.start_x, yaw=math.radians(args.start_yaw_deg))
+        from mjlab_microduck.sim.navigation_eval import APARTMENT_SCENES
+
+        if args.scene.name in APARTMENT_SCENES:
+            try:
+                validate_apartment_spawn(body)
+            except ValueError as error:
+                raise SystemExit(str(error)) from error
         world.bodies.append(body)
         # Kinematics before anything can be asked for. `site_xpos` and `site_xmat` are unpopulated
         # until a forward pass has run — zero, not stale — and a ToF read that arrives first casts a

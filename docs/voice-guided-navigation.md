@@ -39,6 +39,10 @@ placement; +90° faces world +y. They apply only before physics starts and the
 daemon enables the body. Multiple ducks retain the existing 0.5 m y spacing.
 There is no navigation-time teleport/reset action. Select obstacle-free spawn
 positions; this placement interface intentionally does not infer a route.
+Apartment starts are checked in both the requested pose and HOME before the
+daemon can connect. Initial robot geometry must have 20 mm clearance from walls,
+furniture and loose objects, and a small support footprint must have flat floor
+under it. A failed check explains the obstructing geometry and refuses setup.
 
 ## Independently check arrival
 
@@ -54,6 +58,31 @@ arrival. Use `--start-time` and `--end-time` in simulator seconds to score exact
 one episode from a longer recording, or `--duck` to select a body. The scorer
 also reports whether the duck arrived earlier and subsequently moved away.
 An interrupted final JSONL record is ignored; corrupt complete records fail.
+
+For an actual navigation run, bind the score to its exact start/finish events:
+
+```bash
+uv run python -m mjlab_microduck.sim.mission_eval \
+  artifacts/navigation/episode-001.truth.jsonl \
+  ../microduck/apps/navigation/runs/RUN_DIRECTORY
+```
+
+This reads `mission.json` and its sibling `events.jsonl`, verifies the recorded
+final result matches, and selects only that mission's wall-clock interval. Both
+processes must use the same host clock. The report requires continuous truth
+coverage with no gap above 0.5 s and retains source hashes for reproduction.
+An earlier arrival or a pose reached after the mission ended cannot pass.
+The model's arrival claim, physical arrival, final stop acknowledgement and safety
+evidence are reported separately; exit 0 requires all four.
+
+New truth logs inspect robot contacts on every physics step (200 Hz), accumulating
+wall, furniture, loose-object and other-robot contacts into the 10 Hz records.
+Self contacts and named apartment floor supports are excluded. Each window records
+the number of contact steps, maximum penetration and obstacle names; brief contacts
+between truth records are retained. The first selected window can conservatively
+include contact just before mission start. Old logs without contact fields cannot
+establish a collision-free run. The mission scorer also checks for released-body
+samples with trunk height below 6 cm or tilt above 60° as fall evidence.
 
 The optional truth log is a separate, exclusive-create file; existing evidence
 is never overwritten. It records at approximately 10 Hz and is **evaluation

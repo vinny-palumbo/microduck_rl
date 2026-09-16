@@ -19,6 +19,7 @@ import socket
 import socketserver
 import struct
 import threading
+import time
 
 import mujoco
 import numpy as np
@@ -93,11 +94,35 @@ class Camera:
         fixed = np.zeros(4)
         mujoco.mju_mulQuat(fixed, model.cam_quat[self.camera], turn)
         model.cam_quat[self.camera] = fixed
-        self.renderer = mujoco.Renderer(model, height=height, width=width)
+        self.model = model
+        self.renderer = None
+        self._stop = threading.Event()
+        self._thread = None
         self.width = width
         self.height = height
         self.latest: bytes | None = None
         self.lock = threading.Lock()
+
+    def start(self, world, fps=FPS):
+        """Own the GL context on a worker so rendering never blocks physics."""
+        def work():
+            self.renderer = mujoco.Renderer(self.model, height=self.height, width=self.width)
+            self.renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = False
+            self.renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
+            try:
+                while not self._stop.is_set():
+                    start = time.perf_counter()
+                    self.render(world)
+                    self._stop.wait(max(0, 1 / max(1, fps) - (time.perf_counter() - start)))
+            finally:
+                self.renderer.close()
+        self._thread = threading.Thread(target=work, daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
 
     def render(self, world) -> None:
         """Render one frame, reading `MjData` only while holding the world's lock.

@@ -467,7 +467,8 @@ def run(world: World, headless: bool) -> None:
     passes_per_frame = max(1, round((1.0 / 30.0) / period))
     # The cameras, at their own rate — slower than the viewer and far slower than physics.
     eyes = [b for b in world.bodies if b.camera is not None]
-    passes_per_eye = max(1, round((1.0 / CAMERA_FPS) / period))
+    for body in eyes:
+        body.camera.start(world)
     step = 0
     next_step = time.perf_counter()
     behind = 0
@@ -492,13 +493,11 @@ def run(world: World, headless: bool) -> None:
             step += 1
             if viewer is not None and step % passes_per_frame == 0:
                 viewer.sync()
-            if eyes and step % passes_per_eye == 0:
-                for body in eyes:
-                    if body.camera is not None:
-                        body.camera.render(world)
     except KeyboardInterrupt:
         pass
     finally:
+        for body in eyes:
+            body.camera.close()
         if viewer is not None:
             viewer.close()
 

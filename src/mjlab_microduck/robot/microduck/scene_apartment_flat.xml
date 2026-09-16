@@ -1,0 +1,10 @@
+<mujoco model="apartment_flat">
+    <include file="scene_apartment.xml" />
+    <!-- Early navigation exercises obstacle stopping before drop-off detection. Cover only
+         the stairwell opening; reuse the apartment's rooms, furniture, poses, and lighting. -->
+    <worldbody>
+        <geom name="floor_stairwell_cover" type="box" size="0.20 0.35 0.005"
+              pos="-0.20 -1.05 -0.005" material="floor_corridor"
+              contype="1" conaffinity="1" />
+    </worldbody>
+</mujoco>
